@@ -1,0 +1,135 @@
+---
+# Cachenet CDN SSL Certificate Installation Playbook
+# Deploys SSL certificates to edge nodes
+
+- name: Deploy SSL Certificates to Edge Nodes
+  hosts: edge_nodes
+  become: yes
+  gather_facts: yes
+  vars:
+    ssl_dir: /etc/letsencrypt/live
+    
+  tasks:
+    - name: Create SSL directory for domain
+      file:
+        path: "{{ ssl_dir }}/{{ domain_name }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      when: domain_name is defined
+      
+    - name: Copy SSL certificate
+      copy:
+        content: "{{ ssl_certificate }}"
+        dest: "{{ ssl_dir }}/{{ domain_name }}/fullchain.pem"
+        owner: root
+        group: root
+        mode: '0644'
+      when: ssl_certificate is defined and domain_name is defined
+      notify: reload nginx
+      
+    - name: Copy SSL private key
+      copy:
+        content: "{{ ssl_private_key }}"
+        dest: "{{ ssl_dir }}/{{ domain_name }}/privkey.pem"
+        owner: root
+        group: root
+        mode: '0600'
+      when: ssl_private_key is defined and domain_name is defined
+      notify: reload nginx
+      
+    - name: Copy SSL certificate chain
+      copy:
+        content: "{{ ssl_chain }}"
+        dest: "{{ ssl_dir }}/{{ domain_name }}/chain.pem"
+        owner: root
+        group: root
+        mode: '0644'
+      when: ssl_chain is defined and domain_name is defined
+      notify: reload nginx
+      
+    - name: Update Nginx configuration for SSL
+      template:
+        src: cachenet.conf.j2
+        dest: /etc/nginx/sites-available/cachenet
+        owner: root
+        group: root
+        mode: '0644'
+        backup: yes
+      vars:
+        ssl_enabled: true
+      notify: reload nginx
+      
+    - name: Test Nginx configuration
+      command: nginx -t
+      register: nginx_test
+      failed_when: nginx_test.rc != 0
+      
+    - name: Verify SSL certificate
+      command: openssl x509 -in {{ ssl_dir }}/{{ domain_name }}/fullchain.pem -text -noout
+      register: ssl_verify
+      when: domain_name is defined
+      failed_when: false
+      
+    - name: Test SSL connectivity
+      uri:
+        url: "https://{{ domain_name }}"
+        method: HEAD
+        timeout: 10
+        validate_certs: yes
+      register: ssl_test
+      when: domain_name is defined
+      failed_when: false
+      
+    - name: Create SSL renewal script
+      copy:
+        content: |
+          #!/bin/bash
+          # SSL Certificate Renewal Check Script for {{ domain_name }}
+          
+          DOMAIN="{{ domain_name }}"
+          CERT_FILE="{{ ssl_dir }}/${DOMAIN}/fullchain.pem"
+          
+          if [ -f "$CERT_FILE" ]; then
+              # Check certificate expiry
+              EXPIRY_DATE=$(openssl x509 -enddate -noout -in "$CERT_FILE" | cut -d= -f2)
+              EXPIRY_EPOCH=$(date -d "$EXPIRY_DATE" +%s)
+              CURRENT_EPOCH=$(date +%s)
+              DAYS_UNTIL_EXPIRY=$(( ($EXPIRY_EPOCH - $CURRENT_EPOCH) / 86400 ))
+              
+              echo "$(date) - SSL certificate for $DOMAIN expires in $DAYS_UNTIL_EXPIRY days" >> /var/log/cachenet-ssl-check.log
+              
+              # Alert if certificate expires in less than 30 days
+              if [ $DAYS_UNTIL_EXPIRY -lt 30 ]; then
+                  echo "$(date) - WARNING: SSL certificate for $DOMAIN expires in $DAYS_UNTIL_EXPIRY days!" >> /var/log/cachenet-ssl-alerts.log
+              fi
+          else
+              echo "$(date) - ERROR: SSL certificate file not found for $DOMAIN" >> /var/log/cachenet-ssl-alerts.log
+          fi
+        dest: /usr/local/bin/ssl-check-{{ domain_name }}.sh
+        owner: root
+        group: root
+        mode: '0755'
+      when: domain_name is defined
+      
+    - name: Schedule SSL certificate check
+      cron:
+        name: "SSL certificate check for {{ domain_name }}"
+        hour: "6"
+        minute: "0"
+        job: "/usr/local/bin/ssl-check-{{ domain_name }}.sh"
+        user: root
+      when: domain_name is defined
+      
+    - name: Log SSL deployment
+      lineinfile:
+        path: /var/log/cachenet-ssl-deployments.log
+        line: "{{ ansible_date_time.iso8601 }} - SSL deployed on {{ ansible_hostname }} - Domain: {{ domain_name }} - Status: {{ 'success' if ssl_test.status == 200 else 'warning' }}"
+        create: yes
+        
+  handlers:
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded

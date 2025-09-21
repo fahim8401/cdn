@@ -1,0 +1,240 @@
+# Cachenet CDN Prometheus Configuration
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'cachenet-cdn'
+    environment: 'production'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          # - alertmanager:9093
+
+# Load rules once and periodically evaluate them according to the global 'evaluation_interval'.
+rule_files:
+  # - "first_rules.yml"
+  # - "second_rules.yml"
+
+# A scrape configuration containing exactly one endpoint to scrape:
+scrape_configs:
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # Cachenet API metrics
+  - job_name: 'cachenet-api'
+    static_configs:
+      - targets: ['api:5000']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    scrape_timeout: 10s
+
+  # Edge nodes - dynamically updated by update-prometheus.py script
+  - job_name: 'cachenet-edge-nodes'
+    file_sd_configs:
+      - files:
+          - '/etc/prometheus/edge_nodes.json'
+        refresh_interval: 5m
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    scrape_timeout: 10s
+
+  # Nginx metrics from edge nodes
+  - job_name: 'nginx-edge-nodes'
+    file_sd_configs:
+      - files:
+          - '/etc/prometheus/edge_nodes.json'
+        refresh_interval: 5m
+    metrics_path: '/nginx_status'
+    scrape_interval: 15s
+    scrape_timeout: 5s
+
+  # System metrics from edge nodes (if node_exporter is installed)
+  - job_name: 'node-exporter-edge'
+    file_sd_configs:
+      - files:
+          - '/etc/prometheus/edge_nodes.json'
+        refresh_interval: 5m
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    static_configs:
+      - targets: []
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __address__
+        regex: '(.+):.*'
+        replacement: '${1}:9100'
+
+  # PostgreSQL metrics
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['db:5432']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # Redis metrics
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis:6379']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # Docker container metrics
+  - job_name: 'docker'
+    static_configs:
+      - targets: ['localhost:9323']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+# Recording rules for Cachenet CDN metrics
+recording_rules:
+  - name: cachenet_cdn_rules
+    rules:
+      # Cache hit ratio calculation
+      - record: cachenet:cache_hit_ratio
+        expr: |
+          (
+            sum(rate(nginx_http_requests_total{status=~"2.."}[5m])) by (instance) /
+            sum(rate(nginx_http_requests_total[5m])) by (instance)
+          ) * 100
+
+      # Bandwidth saved calculation
+      - record: cachenet:bandwidth_saved_bytes
+        expr: |
+          sum(rate(nginx_http_request_size_bytes[5m])) by (instance) -
+          sum(rate(nginx_upstream_response_size_bytes[5m])) by (instance)
+
+      # Response time percentiles
+      - record: cachenet:response_time_p95
+        expr: |
+          histogram_quantile(0.95, 
+            sum(rate(nginx_http_request_duration_seconds_bucket[5m])) by (le, instance)
+          )
+
+      # Error rate calculation
+      - record: cachenet:error_rate
+        expr: |
+          (
+            sum(rate(nginx_http_requests_total{status=~"4..|5.."}[5m])) by (instance) /
+            sum(rate(nginx_http_requests_total[5m])) by (instance)
+          ) * 100
+
+      # Edge node availability
+      - record: cachenet:edge_node_up
+        expr: |
+          up{job="cachenet-edge-nodes"}
+
+      # Total requests per second
+      - record: cachenet:requests_per_second
+        expr: |
+          sum(rate(nginx_http_requests_total[5m])) by (instance)
+
+# Alerting rules for Cachenet CDN
+alerting_rules:
+  - name: cachenet_cdn_alerts
+    rules:
+      # Edge node down alert
+      - alert: EdgeNodeDown
+        expr: up{job="cachenet-edge-nodes"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: cachenet-cdn
+        annotations:
+          summary: "Edge node {{ $labels.instance }} is down"
+          description: "Edge node {{ $labels.instance }} has been down for more than 1 minute"
+
+      # High error rate alert
+      - alert: HighErrorRate
+        expr: cachenet:error_rate > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: cachenet-cdn
+        annotations:
+          summary: "High error rate on {{ $labels.instance }}"
+          description: "Error rate is {{ $value }}% on {{ $labels.instance }}"
+
+      # Low cache hit ratio alert
+      - alert: LowCacheHitRatio
+        expr: cachenet:cache_hit_ratio < 70
+        for: 10m
+        labels:
+          severity: warning
+          service: cachenet-cdn
+        annotations:
+          summary: "Low cache hit ratio on {{ $labels.instance }}"
+          description: "Cache hit ratio is {{ $value }}% on {{ $labels.instance }}"
+
+      # High response time alert
+      - alert: HighResponseTime
+        expr: cachenet:response_time_p95 > 2
+        for: 5m
+        labels:
+          severity: warning
+          service: cachenet-cdn
+        annotations:
+          summary: "High response time on {{ $labels.instance }}"
+          description: "95th percentile response time is {{ $value }}s on {{ $labels.instance }}"
+
+      # API service down alert
+      - alert: APIServiceDown
+        expr: up{job="cachenet-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: cachenet-api
+        annotations:
+          summary: "Cachenet API service is down"
+          description: "The Cachenet API service has been down for more than 1 minute"
+
+      # Database connection issues
+      - alert: DatabaseDown
+        expr: up{job="postgres"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: database
+        annotations:
+          summary: "PostgreSQL database is down"
+          description: "PostgreSQL database has been down for more than 2 minutes"
+
+      # Redis connection issues
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: cache
+        annotations:
+          summary: "Redis cache is down"
+          description: "Redis cache service has been down for more than 2 minutes"
+
+      # Disk space alert for edge nodes
+      - alert: EdgeNodeDiskSpaceHigh
+        expr: (1 - node_filesystem_avail_bytes / node_filesystem_size_bytes) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+          service: cachenet-cdn
+        annotations:
+          summary: "High disk usage on edge node {{ $labels.instance }}"
+          description: "Disk usage is {{ $value }}% on {{ $labels.instance }}"
+
+      # Memory usage alert for edge nodes
+      - alert: EdgeNodeMemoryHigh
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 90
+        for: 5m
+        labels:
+          severity: warning
+          service: cachenet-cdn
+        annotations:
+          summary: "High memory usage on edge node {{ $labels.instance }}"
+          description: "Memory usage is {{ $value }}% on {{ $labels.instance }}"

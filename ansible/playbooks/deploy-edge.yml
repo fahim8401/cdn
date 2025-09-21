@@ -1,0 +1,377 @@
+---
+# Cachenet CDN Edge Server Deployment Playbook
+# Installs and configures Nginx with caching on edge nodes
+
+- name: Deploy Cachenet Edge Server
+  hosts: edge_nodes
+  become: yes
+  gather_facts: yes
+  vars:
+    nginx_user: www-data
+    cache_dir: /var/cache/nginx/cachenet
+    log_dir: /var/log/nginx
+    ssl_dir: /etc/letsencrypt/live
+    
+  tasks:
+    - name: Update package cache (Ubuntu/Debian)
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+      
+    - name: Update package cache (CentOS/RHEL)
+      yum:
+        update_cache: yes
+      when: ansible_os_family == "RedHat"
+
+    - name: Install required packages (Ubuntu/Debian)
+      apt:
+        name:
+          - nginx
+          - curl
+          - htop
+          - iotop
+          - netstat-persistent
+          - ufw
+          - fail2ban
+          - logrotate
+        state: present
+      when: ansible_os_family == "Debian"
+      
+    - name: Install required packages (CentOS/RHEL)
+      yum:
+        name:
+          - nginx
+          - curl
+          - htop
+          - iotop
+          - net-tools
+          - firewalld
+          - fail2ban
+          - logrotate
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Create nginx cache directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ nginx_user }}"
+        group: "{{ nginx_user }}"
+        mode: '0755'
+      loop:
+        - "{{ cache_dir }}"
+        - "{{ cache_dir }}/temp"
+        - "{{ log_dir }}"
+        - /etc/nginx/conf.d
+        - /etc/nginx/ssl
+        - /var/www/html/health
+
+    - name: Deploy Nginx main configuration
+      template:
+        src: cachenet.conf.j2
+        dest: /etc/nginx/sites-available/cachenet
+        owner: root
+        group: root
+        mode: '0644'
+      notify: reload nginx
+      
+    - name: Enable Cachenet site
+      file:
+        src: /etc/nginx/sites-available/cachenet
+        dest: /etc/nginx/sites-enabled/cachenet
+        state: link
+      notify: reload nginx
+      
+    - name: Remove default Nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: reload nginx
+
+    - name: Create health check endpoint
+      copy:
+        content: |
+          server {
+              listen 80;
+              server_name health.local;
+              location /health {
+                  access_log off;
+                  return 200 "OK - Edge Node {{ ansible_hostname }} - {{ ansible_default_ipv4.address }}\n";
+                  add_header Content-Type text/plain;
+              }
+          }
+        dest: /etc/nginx/sites-available/health
+        owner: root
+        group: root
+        mode: '0644'
+      notify: reload nginx
+      
+    - name: Enable health check site
+      file:
+        src: /etc/nginx/sites-available/health
+        dest: /etc/nginx/sites-enabled/health
+        state: link
+      notify: reload nginx
+
+    - name: Configure Nginx main config
+      copy:
+        content: |
+          user {{ nginx_user }};
+          worker_processes auto;
+          pid /run/nginx.pid;
+          
+          events {
+              worker_connections 1024;
+              use epoll;
+              multi_accept on;
+          }
+          
+          http {
+              # Basic Settings
+              sendfile on;
+              tcp_nopush on;
+              tcp_nodelay on;
+              keepalive_timeout 65;
+              types_hash_max_size 2048;
+              server_tokens off;
+              
+              # MIME types
+              include /etc/nginx/mime.types;
+              default_type application/octet-stream;
+              
+              # Logging
+              log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                              '$status $body_bytes_sent "$http_referer" '
+                              '"$http_user_agent" "$http_x_forwarded_for" '
+                              'cache_status:$upstream_cache_status '
+                              'edge_server:{{ ansible_hostname }}';
+              
+              access_log {{ log_dir }}/access.log main;
+              error_log {{ log_dir }}/error.log warn;
+              
+              # Gzip compression
+              gzip on;
+              gzip_vary on;
+              gzip_proxied any;
+              gzip_comp_level 6;
+              gzip_types
+                  text/plain
+                  text/css
+                  text/xml
+                  text/javascript
+                  application/json
+                  application/javascript
+                  application/xml+rss
+                  application/atom+xml
+                  image/svg+xml;
+              
+              # Cache settings
+              proxy_cache_path {{ cache_dir }} levels=1:2 keys_zone=cachenet:100m max_size=10g inactive=7d use_temp_path=off;
+              proxy_temp_path {{ cache_dir }}/temp;
+              
+              # Rate limiting
+              limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+              limit_req_zone $binary_remote_addr zone=purge:10m rate=1r/s;
+              
+              # Include site configs
+              include /etc/nginx/sites-enabled/*;
+          }
+        dest: /etc/nginx/nginx.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart nginx
+
+    - name: Configure logrotate for Nginx
+      copy:
+        content: |
+          {{ log_dir }}/*.log {
+              daily
+              missingok
+              rotate 30
+              compress
+              delaycompress
+              notifempty
+              create 644 {{ nginx_user }} adm
+              sharedscripts
+              prerotate
+                  if [ -d /etc/logrotate.d/httpd-prerotate ]; then \
+                      run-parts /etc/logrotate.d/httpd-prerotate; \
+                  fi \
+              endscript
+              postrotate
+                  invoke-rc.d nginx rotate >/dev/null 2>&1
+              endscript
+          }
+        dest: /etc/logrotate.d/nginx
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Configure firewall (Ubuntu/Debian)
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - '22'
+        - '80'
+        - '443'
+      when: ansible_os_family == "Debian"
+      
+    - name: Enable firewall (Ubuntu/Debian)
+      ufw:
+        state: enabled
+        policy: deny
+        direction: incoming
+      when: ansible_os_family == "Debian"
+
+    - name: Configure firewall (CentOS/RHEL)
+      firewalld:
+        port: "{{ item }}/tcp"
+        permanent: yes
+        state: enabled
+        immediate: yes
+      loop:
+        - '22'
+        - '80'
+        - '443'
+      when: ansible_os_family == "RedHat"
+
+    - name: Configure fail2ban for Nginx
+      copy:
+        content: |
+          [nginx-http-auth]
+          enabled = true
+          filter = nginx-http-auth
+          port = http,https
+          logpath = {{ log_dir }}/error.log
+          maxretry = 3
+          bantime = 3600
+          
+          [nginx-limit-req]
+          enabled = true
+          filter = nginx-limit-req
+          port = http,https
+          logpath = {{ log_dir }}/error.log
+          maxretry = 10
+          bantime = 600
+        dest: /etc/fail2ban/jail.d/nginx.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart fail2ban
+
+    - name: Start and enable services
+      systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - nginx
+        - fail2ban
+
+    - name: Create Cachenet monitoring script
+      copy:
+        content: |
+          #!/bin/bash
+          # Cachenet Edge Node Monitoring Script
+          
+          # Get system metrics
+          HOSTNAME=$(hostname)
+          LOAD=$(uptime | awk -F'load average:' '{ print $2 }' | awk '{ print $1 }' | sed 's/,//')
+          MEMORY=$(free | grep Mem | awk '{printf "%.1f", $3/$2 * 100.0}')
+          DISK=$(df / | tail -1 | awk '{print $5}' | sed 's/%//')
+          
+          # Get Nginx metrics
+          NGINX_STATUS=$(systemctl is-active nginx)
+          CACHE_SIZE=$(du -sh {{ cache_dir }} 2>/dev/null | cut -f1 || echo "0")
+          
+          # Get network metrics
+          CONNECTIONS=$(netstat -an | grep :80 | wc -l)
+          
+          # Log metrics
+          echo "$(date '+%Y-%m-%d %H:%M:%S') - Edge:$HOSTNAME Load:$LOAD Memory:${MEMORY}% Disk:${DISK}% Nginx:$NGINX_STATUS Cache:$CACHE_SIZE Connections:$CONNECTIONS" >> /var/log/cachenet-metrics.log
+          
+          # Send metrics to API (if configured)
+          if [ -n "$CACHENET_API_URL" ]; then
+              curl -s -X POST "$CACHENET_API_URL/api/auto-scale/edge-nodes/{{ ansible_default_ipv4.address }}/heartbeat" \
+                  -H "Content-Type: application/json" \
+                  -d "{
+                      \"status\": \"healthy\",
+                      \"load_score\": $LOAD,
+                      \"memory_usage\": $MEMORY,
+                      \"disk_usage\": $DISK,
+                      \"cache_size\": \"$CACHE_SIZE\",
+                      \"connections\": $CONNECTIONS
+                  }" || true
+          fi
+        dest: /usr/local/bin/cachenet-monitor.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Schedule monitoring script
+      cron:
+        name: "Cachenet monitoring"
+        minute: "*/5"
+        job: "/usr/local/bin/cachenet-monitor.sh"
+        user: root
+
+    - name: Create cache cleanup script
+      copy:
+        content: |
+          #!/bin/bash
+          # Cachenet Cache Cleanup Script
+          
+          # Remove cache files older than 7 days
+          find {{ cache_dir }} -type f -mtime +7 -delete
+          
+          # Remove empty directories
+          find {{ cache_dir }} -type d -empty -delete
+          
+          # Log cleanup
+          echo "$(date '+%Y-%m-%d %H:%M:%S') - Cache cleanup completed on {{ ansible_hostname }}" >> /var/log/cachenet-cleanup.log
+        dest: /usr/local/bin/cachenet-cleanup.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Schedule cache cleanup
+      cron:
+        name: "Cachenet cache cleanup"
+        hour: "2"
+        minute: "0"
+        job: "/usr/local/bin/cachenet-cleanup.sh"
+        user: root
+
+    - name: Optimize system for caching
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+      loop:
+        - { key: 'net.core.rmem_max', value: '16777216' }
+        - { key: 'net.core.wmem_max', value: '16777216' }
+        - { key: 'net.ipv4.tcp_rmem', value: '4096 65536 16777216' }
+        - { key: 'net.ipv4.tcp_wmem', value: '4096 65536 16777216' }
+        - { key: 'net.core.netdev_max_backlog', value: '5000' }
+        - { key: 'net.ipv4.tcp_congestion_control', value: 'bbr' }
+
+  handlers:
+    - name: restart nginx
+      systemd:
+        name: nginx
+        state: restarted
+        
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded
+        
+    - name: restart fail2ban
+      systemd:
+        name: fail2ban
+        state: restarted

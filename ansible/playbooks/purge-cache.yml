@@ -1,0 +1,44 @@
+---
+# Cachenet CDN Cache Purging Playbook
+# Purges cache across all edge nodes
+
+- name: Purge Cache on Edge Nodes
+  hosts: edge_nodes
+  become: yes
+  gather_facts: no
+  vars:
+    cache_dir: /var/cache/nginx/cachenet
+    
+  tasks:
+    - name: Purge specific domain cache
+      shell: |
+        find {{ cache_dir }} -name "*{{ domain_name }}*" -type f -delete
+        nginx -s reload
+      when: domain_name is defined
+      register: purge_result
+      
+    - name: Purge specific URL cache
+      shell: |
+        # Create cache key similar to Nginx
+        CACHE_KEY="{{ domain_name | default('') }}{{ url_path | default('') }}"
+        find {{ cache_dir }} -name "*${CACHE_KEY//\//_}*" -type f -delete
+        nginx -s reload
+      when: url_path is defined
+      register: purge_url_result
+      
+    - name: Purge all cache
+      shell: |
+        rm -rf {{ cache_dir }}/*
+        nginx -s reload
+      when: purge_all is defined and purge_all
+      register: purge_all_result
+      
+    - name: Log purge action
+      lineinfile:
+        path: /var/log/cachenet-purge.log
+        line: "{{ ansible_date_time.iso8601 }} - Cache purged on {{ ansible_hostname }} - Domain: {{ domain_name | default('all') }} - URL: {{ url_path | default('all') }} - Type: {{ 'all' if purge_all is defined else 'selective' }}"
+        create: yes
+        
+    - name: Display purge results
+      debug:
+        msg: "Cache purge completed on {{ ansible_hostname }}"
