@@ -1,0 +1,56 @@
+---
+# Cachenet CDN Origin Server Update Playbook
+# Updates origin server configuration across edge nodes
+
+- name: Update Origin Server Configuration
+  hosts: edge_nodes
+  become: yes
+  gather_facts: yes
+  
+  tasks:
+    - name: Backup current configuration
+      copy:
+        src: /etc/nginx/sites-available/cachenet
+        dest: /etc/nginx/sites-available/cachenet.backup.{{ ansible_date_time.epoch }}
+        remote_src: yes
+        
+    - name: Update Nginx configuration with new origin
+      template:
+        src: cachenet.conf.j2
+        dest: /etc/nginx/sites-available/cachenet
+        owner: root
+        group: root
+        mode: '0644'
+        backup: yes
+      notify: reload nginx
+      
+    - name: Test Nginx configuration
+      command: nginx -t
+      register: nginx_test
+      failed_when: nginx_test.rc != 0
+      
+    - name: Purge cache after origin change
+      shell: |
+        find /var/cache/nginx/cachenet -name "*{{ domain_name }}*" -type f -delete
+        echo "$(date) - Cache purged for {{ domain_name }} after origin update to {{ new_origin }}" >> /var/log/cachenet-origin-updates.log
+      when: domain_name is defined
+      
+    - name: Verify new origin connectivity
+      uri:
+        url: "{{ new_origin }}"
+        method: HEAD
+        timeout: 10
+      register: origin_check
+      failed_when: false
+      
+    - name: Log origin update
+      lineinfile:
+        path: /var/log/cachenet-origin-updates.log
+        line: "{{ ansible_date_time.iso8601 }} - Origin updated on {{ ansible_hostname }} - Domain: {{ domain_name }} - Old: {{ old_origin | default('unknown') }} - New: {{ new_origin }} - Status: {{ 'success' if origin_check.status == 200 else 'warning' }}"
+        create: yes
+        
+  handlers:
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded
