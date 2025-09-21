@@ -1,0 +1,132 @@
+# Cachenet CDN Prometheus Rules
+# Additional alerting and recording rules
+
+groups:
+  # SSL Certificate monitoring
+  - name: ssl_certificates
+    rules:
+      - alert: SSLCertificateExpiringSoon
+        expr: (ssl_certificate_expiry_days < 30) and (ssl_certificate_expiry_days > 0)
+        for: 1h
+        labels:
+          severity: warning
+          service: ssl
+        annotations:
+          summary: "SSL certificate expiring soon for {{ $labels.domain }}"
+          description: "SSL certificate for {{ $labels.domain }} expires in {{ $value }} days"
+
+      - alert: SSLCertificateExpired
+        expr: ssl_certificate_expiry_days <= 0
+        for: 0m
+        labels:
+          severity: critical
+          service: ssl
+        annotations:
+          summary: "SSL certificate expired for {{ $labels.domain }}"
+          description: "SSL certificate for {{ $labels.domain }} has expired"
+
+  # Auto-scaling alerts
+  - name: auto_scaling
+    rules:
+      - alert: EdgeNodeOverloaded
+        expr: cachenet_edge_node_load_score > 0.8
+        for: 10m
+        labels:
+          severity: warning
+          service: auto-scaling
+        annotations:
+          summary: "Edge node {{ $labels.instance }} is overloaded"
+          description: "Edge node {{ $labels.instance }} has load score {{ $value }}"
+
+      - alert: TooFewActiveEdgeNodes
+        expr: count(up{job="cachenet-edge-nodes"} == 1) < 2
+        for: 5m
+        labels:
+          severity: critical
+          service: auto-scaling
+        annotations:
+          summary: "Too few active edge nodes"
+          description: "Only {{ $value }} edge nodes are active, minimum required is 2"
+
+  # CDN Performance metrics
+  - name: cdn_performance
+    rules:
+      - record: cachenet:total_requests_per_second
+        expr: sum(rate(nginx_http_requests_total[5m]))
+
+      - record: cachenet:total_bandwidth_gbps
+        expr: sum(rate(nginx_http_request_size_bytes[5m])) / 1000000000
+
+      - record: cachenet:average_cache_hit_ratio
+        expr: |
+          (
+            sum(rate(nginx_http_requests_total{status=~"2..",cache_status="HIT"}[5m])) /
+            sum(rate(nginx_http_requests_total[5m]))
+          ) * 100
+
+      - record: cachenet:edge_nodes_healthy
+        expr: count(up{job="cachenet-edge-nodes"} == 1)
+
+      - record: cachenet:domains_active
+        expr: count(cachenet_domain_status == 1)
+
+  # Business metrics
+  - name: business_metrics
+    rules:
+      - record: cachenet:monthly_bandwidth_saved_gb
+        expr: |
+          sum(increase(cachenet_bandwidth_saved_bytes[30d])) / 1000000000
+
+      - record: cachenet:monthly_requests
+        expr: |
+          sum(increase(nginx_http_requests_total[30d]))
+
+      - record: cachenet:cost_savings_usd
+        expr: |
+          cachenet:monthly_bandwidth_saved_gb * 0.08  # Assume $0.08 per GB saved
+
+  # Edge node health
+  - name: edge_health
+    rules:
+      - alert: EdgeNodeCPUHigh
+        expr: (100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)) > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: edge-node
+        annotations:
+          summary: "High CPU usage on edge node {{ $labels.instance }}"
+          description: "CPU usage is {{ $value }}% on {{ $labels.instance }}"
+
+      - alert: EdgeNodeNetworkErrors
+        expr: rate(node_network_receive_errs_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+          service: edge-node
+        annotations:
+          summary: "Network errors on edge node {{ $labels.instance }}"
+          description: "Network error rate is {{ $value }} errors/sec on {{ $labels.instance }}"
+
+  # Domain-specific alerts
+  - name: domain_alerts
+    rules:
+      - alert: DomainNotResponding
+        expr: probe_success{job="blackbox"} == 0
+        for: 3m
+        labels:
+          severity: critical
+          service: domain
+        annotations:
+          summary: "Domain {{ $labels.instance }} is not responding"
+          description: "Domain {{ $labels.instance }} has been unreachable for more than 3 minutes"
+
+      - alert: DomainHighResponseTime
+        expr: probe_duration_seconds{job="blackbox"} > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: domain
+        annotations:
+          summary: "High response time for domain {{ $labels.instance }}"
+          description: "Response time is {{ $value }}s for domain {{ $labels.instance }}"
