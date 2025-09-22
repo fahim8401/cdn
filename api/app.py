@@ -23,6 +23,7 @@ from routes.domains import domains_bp
 from routes.cache import cache_bp
 from routes.ssl import ssl_bp
 from routes.auto_scale import auto_scale_bp
+from routes.stats import stats_bp
 
 # Configure logging
 logging.basicConfig(
@@ -64,6 +65,7 @@ def create_app():
     app.register_blueprint(cache_bp, url_prefix='/api/cache')
     app.register_blueprint(ssl_bp, url_prefix='/api/ssl')
     app.register_blueprint(auto_scale_bp, url_prefix='/api/auto-scale')
+    app.register_blueprint(stats_bp, url_prefix='/api/stats')
     
     # Health check endpoint
     @app.route('/health')
