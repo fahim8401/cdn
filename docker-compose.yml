@@ -1,9 +1,9 @@
-version: '3.8'
+version: '3.9'
 
 services:
   # PostgreSQL Database
   db:
-    image: postgres:15-alpine
+    image: postgres:17-alpine
     container_name: cachenet-db
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
@@ -24,7 +24,7 @@ services:
 
   # Redis for Caching and Celery
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     container_name: cachenet-redis
     command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
     volumes:
@@ -41,7 +41,7 @@ services:
 
   # PowerDNS Authoritative Server
   powerdns:
-    image: powerdns/pdns-auth-48:latest
+    image: powerdns/pdns-auth-49:latest
     container_name: cachenet-powerdns
     environment:
       PDNS_AUTH_API_KEY: ${PDNS_API_KEY}
@@ -249,7 +249,7 @@ services:
 
   # Nginx Reverse Proxy
   nginx:
-    image: nginx:alpine
+    image: nginx:1.27-alpine
     container_name: cachenet-nginx
     volumes:
       - ./nginx/cachenet.conf:/etc/nginx/conf.d/default.conf
