@@ -6,6 +6,44 @@
 
 set -e
 
+# Parse command line arguments
+DRY_RUN=false
+SKIP_CONFIG=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        --skip-config)
+            SKIP_CONFIG=true
+            shift
+            ;;
+        --help|-h)
+            echo "Cachenet CDN Installation Script"
+            echo ""
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  --dry-run      Show what would be installed without making changes"
+            echo "  --skip-config  Skip configuration wizard (use existing .env)"
+            echo "  --help, -h     Show this help message"
+            echo ""
+            echo "Examples:"
+            echo "  $0                 # Full interactive installation"
+            echo "  $0 --dry-run       # Preview installation steps"
+            echo "  $0 --skip-config   # Install with existing configuration"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+done
+
 # Color codes for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -21,47 +59,80 @@ CURRENT_STAGE=0
 
 # Logging functions
 log() {
-    echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')] $1${NC}"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo -e "${GREEN}[DRY-RUN] $1${NC}"
+    else
+        echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')] $1${NC}"
+    fi
 }
 
 warn() {
-    echo -e "${YELLOW}[$(date +'%Y-%m-%d %H:%M:%S')] WARNING: $1${NC}"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo -e "${YELLOW}[DRY-RUN] WARNING: $1${NC}"
+    else
+        echo -e "${YELLOW}[$(date +'%Y-%m-%d %H:%M:%S')] WARNING: $1${NC}"
+    fi
 }
 
 error() {
-    echo -e "${RED}[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: $1${NC}"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo -e "${RED}[DRY-RUN] ERROR: $1${NC}"
+    else
+        echo -e "${RED}[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: $1${NC}"
+    fi
 }
 
 info() {
-    echo -e "${BLUE}[$(date +'%Y-%m-%d %H:%M:%S')] INFO: $1${NC}"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo -e "${BLUE}[DRY-RUN] INFO: $1${NC}"
+    else
+        echo -e "${BLUE}[$(date +'%Y-%m-%d %H:%M:%S')] INFO: $1${NC}"
+    fi
 }
 
 stage() {
     CURRENT_STAGE=$((CURRENT_STAGE + 1))
     echo ""
-    echo -e "${PURPLE}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${PURPLE}║ Stage $CURRENT_STAGE/$STAGE_COUNT: $1 ${NC}"
-    echo -e "${PURPLE}╚══════════════════════════════════════════════════════════════╝${NC}"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo -e "${PURPLE}╔══════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${PURPLE}║ DRY-RUN Stage $CURRENT_STAGE/$STAGE_COUNT: $1 ${NC}"
+        echo -e "${PURPLE}╚══════════════════════════════════════════════════════════════╝${NC}"
+    else
+        echo -e "${PURPLE}╔══════════════════════════════════════════════════════════════╗${NC}"
+        echo -e "${PURPLE}║ Stage $CURRENT_STAGE/$STAGE_COUNT: $1 ${NC}"
+        echo -e "${PURPLE}╚══════════════════════════════════════════════════════════════╝${NC}"
+    fi
     echo ""
 }
 
 # Cleanup function for graceful exit
 cleanup() {
-    if [[ $? -ne 0 ]]; then
+    if [[ $? -ne 0 && "$DRY_RUN" != "true" ]]; then
         error "Installation failed. Cleaning up..."
         docker-compose down 2>/dev/null || true
     fi
 }
 
-trap cleanup EXIT
+if [[ "$DRY_RUN" != "true" ]]; then
+    trap cleanup EXIT
+fi
 
 # Display banner
-echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║                    Cachenet Enterprise CDN                   ║${NC}"
-echo -e "${CYAN}║                  Complete A-Z Installation                   ║${NC}"
-echo -e "${CYAN}║                                                              ║${NC}"
-echo -e "${CYAN}║  🚀 Full automation: Config → DB → SSL → Services → Ready!   ║${NC}"
-echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
+if [[ "$DRY_RUN" == "true" ]]; then
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║                    Cachenet Enterprise CDN                   ║${NC}"
+    echo -e "${CYAN}║                     DRY RUN MODE - Preview                   ║${NC}"
+    echo -e "${CYAN}║                                                              ║${NC}"
+    echo -e "${CYAN}║  📋 Preview: Config → DB → SSL → Services → Ready!           ║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
+else
+    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║                    Cachenet Enterprise CDN                   ║${NC}"
+    echo -e "${CYAN}║                  Complete A-Z Installation                   ║${NC}"
+    echo -e "${CYAN}║                                                              ║${NC}"
+    echo -e "${CYAN}║  🚀 Full automation: Config → DB → SSL → Services → Ready!   ║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
+fi
 echo ""
 
 # Stage 1: Pre-installation checks
@@ -139,9 +210,17 @@ stage "Environment Configuration Setup"
 # Check for existing .env file
 if [[ ! -f .env ]]; then
     if [[ -f .env.example ]]; then
+        if [[ "$SKIP_CONFIG" == "true" ]]; then
+            error "No .env file found and --skip-config specified"
+            exit 1
+        fi
         log "No .env file found. Starting configuration wizard..."
         info "Running interactive configuration wizard..."
-        ./scripts/configure.sh
+        if [[ "$DRY_RUN" != "true" ]]; then
+            ./scripts/configure.sh
+        else
+            log "Would run: ./scripts/configure.sh"
+        fi
     else
         error ".env.example template not found!"
         exit 1
@@ -150,20 +229,24 @@ else
     log "Found existing .env file"
     
     # Validate critical configuration
-    if grep -q "CHANGE_ME" .env; then
+    if [[ "$DRY_RUN" != "true" ]] && grep -q "CHANGE_ME" .env; then
         warn "Configuration file contains placeholder values"
-        echo -n -e "${YELLOW}Run configuration wizard to fix? (Y/n): ${NC}"
-        read run_config
-        if [[ ! "$run_config" =~ ^[Nn]$ ]]; then
-            ./scripts/configure.sh
+        if [[ "$SKIP_CONFIG" != "true" ]]; then
+            echo -n -e "${YELLOW}Run configuration wizard to fix? (Y/n): ${NC}"
+            read run_config
+            if [[ ! "$run_config" =~ ^[Nn]$ ]]; then
+                ./scripts/configure.sh
+            fi
         fi
     fi
 fi
 
 # Load environment variables
-if [[ -f .env ]]; then
+if [[ -f .env && "$DRY_RUN" != "true" ]]; then
     export $(grep -v '^#' .env | grep -v '^$' | xargs)
     log "✓ Environment variables loaded"
+elif [[ "$DRY_RUN" == "true" ]]; then
+    log "Would load environment variables from .env"
 else
     error "Failed to create .env file"
     exit 1
@@ -172,36 +255,42 @@ fi
 # Stage 3: Install system dependencies
 stage "Installing System Dependencies"
 
-log "Updating package repositories..."
-if [[ "$PACKAGE_MANAGER" == "apt-get" ]]; then
-    sudo apt-get update -qq
-    
-    # Install required packages
-    log "Installing required system packages..."
-    sudo apt-get install -y -qq \
-        apt-transport-https \
-        ca-certificates \
-        curl \
-        gnupg \
-        lsb-release \
-        git \
-        htop \
-        nano \
-        wget \
-        unzip \
-        openssl \
-        ufw \
-        cron \
-        logrotate \
-        rsync \
-        python3 \
-        python3-pip
+if [[ "$DRY_RUN" == "true" ]]; then
+    log "Would update package repositories"
+    log "Would install required system packages: apt-transport-https, ca-certificates, curl, gnupg, etc."
+    log "✓ System dependencies would be installed"
 else
-    sudo yum update -y -q
-    sudo yum install -y -q curl wget git nano htop openssl firewalld cronie logrotate rsync python3 python3-pip
-fi
+    log "Updating package repositories..."
+    if [[ "$PACKAGE_MANAGER" == "apt-get" ]]; then
+        sudo apt-get update -qq
+        
+        # Install required packages
+        log "Installing required system packages..."
+        sudo apt-get install -y -qq \
+            apt-transport-https \
+            ca-certificates \
+            curl \
+            gnupg \
+            lsb-release \
+            git \
+            htop \
+            nano \
+            wget \
+            unzip \
+            openssl \
+            ufw \
+            cron \
+            logrotate \
+            rsync \
+            python3 \
+            python3-pip
+    else
+        sudo yum update -y -q
+        sudo yum install -y -q curl wget git nano htop openssl firewalld cronie logrotate rsync python3 python3-pip
+    fi
 
-log "✓ System dependencies installed"
+    log "✓ System dependencies installed"
+fi
 
 # Stage 4: Install Docker and Docker Compose
 stage "Installing Docker and Docker Compose"
@@ -607,9 +696,34 @@ log "✓ Cleanup completed"
 
 # Success! Display final information
 echo ""
-echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║           🎉 INSTALLATION COMPLETED SUCCESSFULLY! 🎉         ║${NC}"
-echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
+if [[ "$DRY_RUN" == "true" ]]; then
+    echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║              🎯 DRY RUN COMPLETED SUCCESSFULLY! 🎯           ║${NC}"
+    echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${CYAN}📋 What would be installed:${NC}"
+    echo -e "   ✅ Complete environment configuration"
+    echo -e "   ✅ PostgreSQL database with schema"
+    echo -e "   ✅ Redis caching and message queue"
+    echo -e "   ✅ PowerDNS for domain management"
+    echo -e "   ✅ SSL certificates (self-signed or ACME)"
+    echo -e "   ✅ Nginx reverse proxy with security headers"
+    echo -e "   ✅ API backend with authentication"
+    echo -e "   ✅ Admin and client dashboards"
+    echo -e "   ✅ Monitoring (Prometheus + Grafana)"
+    echo -e "   ✅ Background task processing"
+    echo -e "   ✅ Automated backups and log rotation"
+    echo -e "   ✅ System service for auto-start"
+    echo -e "   ✅ Firewall configuration"
+    echo ""
+    echo -e "${YELLOW}To proceed with actual installation:${NC}"
+    echo -e "   Run: ${GREEN}./install.sh${NC}"
+    echo ""
+else
+    echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║           🎉 INSTALLATION COMPLETED SUCCESSFULLY! 🎉         ║${NC}"
+    echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
+fi
 echo ""
 
 # Load final environment to display correct values
