@@ -129,13 +129,15 @@ fi
 if grep -q "your-jwt-secret-key" .env; then
     warn "Generating secure JWT secret key..."
     JWT_SECRET=$(openssl rand -base64 32)
-    sed -i "s/your-jwt-secret-key-change-this-in-production-xyz789/$JWT_SECRET/g" .env
+    # Use a different delimiter to avoid issues with special characters
+    sed -i "s|your-jwt-secret-key-change-this-in-production-xyz789abc|$JWT_SECRET|g" .env
 fi
 
 if grep -q "your-flask-secret-key" .env; then
     warn "Generating secure Flask secret key..."
     FLASK_SECRET=$(openssl rand -base64 32)
-    sed -i "s/your-flask-secret-key-change-this-xyz789/$FLASK_SECRET/g" .env
+    # Use a different delimiter to avoid issues with special characters
+    sed -i "s|your-flask-secret-key-change-this-xyz789|$FLASK_SECRET|g" .env
 fi
 
 # Generate SSH keys for Ansible
