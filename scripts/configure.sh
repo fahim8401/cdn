@@ -118,13 +118,20 @@ API_DOMAIN=$(prompt_input "API Domain (for management API): " "api.yourdomain.co
 ADMIN_DOMAIN=$(prompt_input "Admin Dashboard Domain: " "admin.yourdomain.com")
 CLIENT_DOMAIN=$(prompt_input "Client Dashboard Domain: " "client.yourdomain.com")
 
+# Set default email based on CDN domain if provided
+if [[ -n "$CDN_DOMAIN" && "$CDN_DOMAIN" != "cdn.yourdomain.com" ]]; then
+    DEFAULT_EMAIL="admin@${CDN_DOMAIN}"
+else
+    DEFAULT_EMAIL="admin@yourdomain.com"
+fi
+
 echo ""
 echo -e "${PURPLE}═══════════════════════════════════════════════════════════════${NC}"
 echo -e "${PURPLE}                   ADMIN USER CONFIGURATION                    ${NC}"
 echo -e "${PURPLE}═══════════════════════════════════════════════════════════════${NC}"
 echo ""
 
-ADMIN_EMAIL=$(prompt_input "Admin Email Address: " "admin@${CDN_DOMAIN}")
+ADMIN_EMAIL=$(prompt_input "Admin Email Address: " "$DEFAULT_EMAIL")
 ADMIN_PASSWORD=$(prompt_input "Admin Password: " "$(generate_password)" "true")
 ADMIN_FIRST_NAME=$(prompt_input "Admin First Name: " "Administrator")
 ADMIN_LAST_NAME=$(prompt_input "Admin Last Name: " "User")
@@ -193,14 +200,31 @@ MAXMIND_ACCOUNT_ID=$(prompt_input "MaxMind Account ID: " "")
 # Update .env file with collected values
 log "Updating configuration file..."
 
-# Domain configuration
-sed -i "s/CHANGE_ME_CDN_DOMAIN/$CDN_DOMAIN/g" "$ENV_FILE"
-sed -i "s/CHANGE_ME_API_DOMAIN/$API_DOMAIN/g" "$ENV_FILE"
-sed -i "s/CHANGE_ME_ADMIN_DOMAIN/$ADMIN_DOMAIN/g" "$ENV_FILE"
-sed -i "s/CHANGE_ME_CLIENT_DOMAIN/$CLIENT_DOMAIN/g" "$ENV_FILE"
+# Validate domains before replacement
+if [[ -z "$CDN_DOMAIN" || -z "$API_DOMAIN" || -z "$ADMIN_DOMAIN" || -z "$CLIENT_DOMAIN" ]]; then
+    error "Domain configuration incomplete. Please run the wizard again."
+    exit 1
+fi
+
+# Domain configuration - use safe replacements
+if [[ "$CDN_DOMAIN" != "cdn.yourdomain.com" ]]; then
+    sed -i "s/CHANGE_ME_CDN_DOMAIN/$CDN_DOMAIN/g" "$ENV_FILE"
+fi
+
+if [[ "$API_DOMAIN" != "api.yourdomain.com" ]]; then
+    sed -i "s/CHANGE_ME_API_DOMAIN/$API_DOMAIN/g" "$ENV_FILE"
+fi
+
+if [[ "$ADMIN_DOMAIN" != "admin.yourdomain.com" ]]; then
+    sed -i "s/CHANGE_ME_ADMIN_DOMAIN/$ADMIN_DOMAIN/g" "$ENV_FILE"
+fi
+
+if [[ "$CLIENT_DOMAIN" != "client.yourdomain.com" ]]; then
+    sed -i "s/CHANGE_ME_CLIENT_DOMAIN/$CLIENT_DOMAIN/g" "$ENV_FILE"
+fi
 
 # Admin user configuration
-sed -i "s/admin@yourdomain.com/$ADMIN_EMAIL/g" "$ENV_FILE"
+sed -i "s|admin@yourdomain.com|$ADMIN_EMAIL|g" "$ENV_FILE"
 sed -i "s/CHANGE_ME_ADMIN_PASSWORD/$ADMIN_PASSWORD/g" "$ENV_FILE"
 sed -i "s/Administrator/$ADMIN_FIRST_NAME/g" "$ENV_FILE"
 sed -i "s/User/$ADMIN_LAST_NAME/g" "$ENV_FILE"
@@ -214,7 +238,7 @@ sed -i "s/CHANGE_ME_MINIO_PASSWORD/$MINIO_ROOT_PASSWORD/g" "$ENV_FILE"
 sed -i "s/CHANGE_ME_GRAFANA_PASSWORD/$GRAFANA_ADMIN_PASSWORD/g" "$ENV_FILE"
 
 # SSL configuration
-sed -i "s/admin@yourdomain.com/$ACME_EMAIL/g" "$ENV_FILE"
+sed -i "s|admin@yourdomain.com|$ACME_EMAIL|g" "$ENV_FILE"
 
 # Cloud providers (only if provided)
 if [[ -n "$DIGITALOCEAN_API_TOKEN" ]]; then
@@ -241,8 +265,10 @@ if [[ -n "$MAXMIND_ACCOUNT_ID" ]]; then
     sed -i "s/CHANGE_ME_MAXMIND_ID/$MAXMIND_ACCOUNT_ID/g" "$ENV_FILE"
 fi
 
-# Update CORS origins
-sed -i "s/https://CHANGE_ME_ADMIN_DOMAIN,https://CHANGE_ME_CLIENT_DOMAIN/https:\/\/$ADMIN_DOMAIN,https:\/\/$CLIENT_DOMAIN/g" "$ENV_FILE"
+# Update CORS origins - use | as delimiter to avoid issues with forward slashes
+if [[ "$ADMIN_DOMAIN" != "admin.yourdomain.com" && "$CLIENT_DOMAIN" != "client.yourdomain.com" ]]; then
+    sed -i "s|https://CHANGE_ME_ADMIN_DOMAIN,https://CHANGE_ME_CLIENT_DOMAIN|https://$ADMIN_DOMAIN,https://$CLIENT_DOMAIN|g" "$ENV_FILE"
+fi
 
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
