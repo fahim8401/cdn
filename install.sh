@@ -97,8 +97,22 @@ sudo apt-get install -y docker-ce docker-ce-cli containerd.io
 sudo curl -L "https://github.com/docker/compose/releases/download/v2.21.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
 sudo chmod +x /usr/local/bin/docker-compose
 
+# Create symbolic link for compatibility (docker compose plugin is preferred)
+if ! command -v docker-compose &> /dev/null; then
+    log "Using Docker Compose plugin (docker compose) instead of standalone binary"
+fi
+
 # Add user to docker group
 sudo usermod -aG docker $USER
+
+# Function to run docker compose commands with proper permissions
+run_docker_compose() {
+    if command -v docker-compose &> /dev/null; then
+        sudo /usr/local/bin/docker-compose "$@"
+    else
+        sudo docker compose "$@"
+    fi
+}
 
 log "Docker and Docker Compose installed ✓"
 
@@ -145,14 +159,16 @@ log "Environment configured ✓"
 # Build and start services
 log "Building and starting Cachenet CDN services..."
 
+# Note: Use sudo with docker compose commands during installation 
+# since group membership doesn't take effect until after logout/login
 # Pull required images
-docker-compose pull
+run_docker_compose pull
 
 # Build custom images
-docker-compose build
+run_docker_compose build
 
 # Start services
-docker-compose up -d
+run_docker_compose up -d
 
 # Wait for services to be ready
 log "Waiting for services to start..."
@@ -170,7 +186,7 @@ else
 fi
 
 # Check if database is responding
-DB_STATUS=$(docker-compose exec -T db pg_isready -U cachenet -d cachenet 2>/dev/null || echo "fail")
+DB_STATUS=$(run_docker_compose exec -T db pg_isready -U cachenet -d cachenet 2>/dev/null || echo "fail")
 if [[ "$DB_STATUS" == *"accepting connections"* ]]; then
     log "Database service is healthy ✓"
 else
@@ -178,7 +194,7 @@ else
 fi
 
 # Check if Redis is responding
-REDIS_STATUS=$(docker-compose exec -T redis redis-cli ping 2>/dev/null || echo "fail")
+REDIS_STATUS=$(run_docker_compose exec -T redis redis-cli ping 2>/dev/null || echo "fail")
 if [[ "$REDIS_STATUS" == "PONG" ]]; then
     log "Redis service is healthy ✓"
 else
@@ -187,7 +203,7 @@ fi
 
 # Initialize database
 log "Initializing database..."
-docker-compose exec api python -c "
+run_docker_compose exec api python -c "
 from app import app, db
 with app.app_context():
     db.create_all()
@@ -196,7 +212,7 @@ with app.app_context():
 
 # Create admin user
 log "Creating admin user..."
-docker-compose exec api python -c "
+run_docker_compose exec api python -c "
 from app import app, db
 from models import User
 from werkzeug.security import generate_password_hash
@@ -243,6 +259,13 @@ log "Firewall configured ✓"
 
 # Create systemd service for auto-start
 log "Creating systemd service..."
+
+# Determine the correct docker compose command for systemd
+DOCKER_COMPOSE_CMD="/usr/local/bin/docker-compose"
+if ! test -f "$DOCKER_COMPOSE_CMD"; then
+    DOCKER_COMPOSE_CMD="docker compose"
+fi
+
 sudo tee /etc/systemd/system/cachenet.service > /dev/null <<EOF
 [Unit]
 Description=Cachenet Enterprise CDN
@@ -253,8 +276,8 @@ After=docker.service
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=$(pwd)
-ExecStart=/usr/local/bin/docker-compose up -d
-ExecStop=/usr/local/bin/docker-compose down
+ExecStart=$DOCKER_COMPOSE_CMD up -d
+ExecStop=$DOCKER_COMPOSE_CMD down
 TimeoutStartSec=0
 
 [Install]
@@ -297,11 +320,14 @@ echo ""
 
 # Log service status
 log "Service status:"
-docker-compose ps
+run_docker_compose ps
 
 # Check if user needs to logout for docker group
 if ! groups $USER | grep -q docker; then
     warn "Please logout and login again for Docker group membership to take effect"
+    warn "This is only needed for running docker commands manually after installation"
+else
+    log "Docker group membership is active ✓"
 fi
 
 exit 0
