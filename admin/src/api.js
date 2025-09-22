@@ -238,3 +238,32 @@ export const toggleUserStatus = async (userId) => {
   })
   return handleResponse(response)
 }
+
+// Statistics API
+export const getBandwidthReport = async (days = 30) => {
+  const response = await fetch(`${API_BASE_URL}/api/stats/bandwidth-report?days=${days}`, {
+    headers: getAuthHeaders()
+  })
+  return handleResponse(response)
+}
+
+export const getDomainAnalytics = async (domainId, days = 30) => {
+  const response = await fetch(`${API_BASE_URL}/api/stats/domains/${domainId}/analytics?days=${days}`, {
+    headers: getAuthHeaders()
+  })
+  return handleResponse(response)
+}
+
+export const getEdgeNodeMetrics = async (edgeId, days = 7) => {
+  const response = await fetch(`${API_BASE_URL}/api/stats/edge-nodes/${edgeId}/metrics?days=${days}`, {
+    headers: getAuthHeaders()
+  })
+  return handleResponse(response)
+}
+
+export const getRealTimeStats = async () => {
+  const response = await fetch(`${API_BASE_URL}/api/stats/real-time`, {
+    headers: getAuthHeaders()
+  })
+  return handleResponse(response)
+}
