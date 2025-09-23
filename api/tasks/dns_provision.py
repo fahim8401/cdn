@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """
-Cachenet CDN Platform DNS Provisioning Tasks
-PowerDNS integration for domain DNS management
+XenCDN v8.2 - DNS Provisioning Tasks
+PowerDNS integration for complete DNS zone management and automation
 """
 
+import json
+import requests
 import os
 import logging
-import requests
-from datetime import datetime
 from celery import shared_task
-from models import db, Domain, EdgeNode, DNSRecord
+from datetime import datetime
 
+# Logger setup
 logger = logging.getLogger(__name__)
 
+# PowerDNS Configuration
 PDNS_API_URL = os.getenv('PDNS_API_URL', 'http://powerdns:8081/api/v1/servers/localhost')
 PDNS_API_KEY = os.getenv('PDNS_API_KEY')
+DNS_SERVER_NAME = os.getenv('DNS_SERVER_NAME', 'ns1.xencdn.com')
+DNS_SERVER_NAME2 = os.getenv('DNS_SERVER_NAME2', 'ns2.xencdn.com')
 
 def get_pdns_headers():
     """Get PowerDNS API headers"""
@@ -23,10 +27,287 @@ def get_pdns_headers():
         'Content-Type': 'application/json'
     }
 
+def create_zone_in_powerdns(zone_name, ns_records):
+    """Create a DNS zone in PowerDNS"""
+    try:
+        headers = get_pdns_headers()
+        
+        # Prepare zone data
+        zone_data = {
+            'name': zone_name,
+            'kind': 'Native',
+            'nameservers': ns_records,
+            'rrsets': [
+                {
+                    'name': zone_name,
+                    'type': 'NS',
+                    'records': [{'content': ns, 'disabled': False} for ns in ns_records]
+                },
+                {
+                    'name': zone_name,
+                    'type': 'SOA',
+                    'records': [{
+                        'content': f"{DNS_SERVER_NAME} hostmaster.{zone_name} 1 10800 3600 604800 3600",
+                        'disabled': False
+                    }]
+                }
+            ]
+        }
+        
+        # Create zone
+        response = requests.post(
+            f"{PDNS_API_URL}/zones",
+            headers=headers,
+            json=zone_data,
+            timeout=30
+        )
+        
+        if response.status_code in [200, 201]:
+            logger.info(f"Zone {zone_name} created successfully in PowerDNS")
+            return {'success': True, 'message': 'Zone created successfully'}
+        elif response.status_code == 409:
+            logger.info(f"Zone {zone_name} already exists in PowerDNS")
+            return {'success': True, 'message': 'Zone already exists'}
+        else:
+            error_msg = f"PowerDNS API error: {response.status_code} - {response.text}"
+            logger.error(error_msg)
+            return {'success': False, 'error': error_msg}
+    
+    except Exception as e:
+        error_msg = f"Failed to create zone in PowerDNS: {str(e)}"
+        logger.error(error_msg)
+        return {'success': False, 'error': error_msg}
+
+def delete_zone_from_powerdns(zone_name):
+    """Delete a DNS zone from PowerDNS"""
+    try:
+        headers = get_pdns_headers()
+        
+        # Delete zone
+        response = requests.delete(
+            f"{PDNS_API_URL}/zones/{zone_name}",
+            headers=headers,
+            timeout=30
+        )
+        
+        if response.status_code in [200, 204, 404]:  # 404 = zone doesn't exist
+            logger.info(f"Zone {zone_name} deleted successfully from PowerDNS")
+            return {'success': True, 'message': 'Zone deleted successfully'}
+        else:
+            error_msg = f"PowerDNS API error: {response.status_code} - {response.text}"
+            logger.error(error_msg)
+            return {'success': False, 'error': error_msg}
+    
+    except Exception as e:
+        error_msg = f"Failed to delete zone from PowerDNS: {str(e)}"
+        logger.error(error_msg)
+        return {'success': False, 'error': error_msg}
+
+def create_record_in_powerdns(zone_name, record_data):
+    """Create or update a DNS record in PowerDNS"""
+    try:
+        headers = get_pdns_headers()
+        
+        # Prepare record data for PowerDNS
+        rrsets_data = {
+            'rrsets': [
+                {
+                    'name': record_data['name'],
+                    'type': record_data['type'],
+                    'changetype': 'REPLACE',
+                    'records': [
+                        {
+                            'content': record_data['content'],
+                            'disabled': record_data.get('disabled', False)
+                        }
+                    ],
+                    'ttl': record_data.get('ttl', 3600)
+                }
+            ]
+        }
+        
+        # Add priority for MX records
+        if record_data['type'] == 'MX' and 'priority' in record_data:
+            rrsets_data['rrsets'][0]['records'][0]['content'] = f"{record_data['priority']} {record_data['content']}"
+        
+        # Update zone records
+        response = requests.patch(
+            f"{PDNS_API_URL}/zones/{zone_name}",
+            headers=headers,
+            json=rrsets_data,
+            timeout=30
+        )
+        
+        if response.status_code in [200, 204]:
+            logger.info(f"Record {record_data['name']} created/updated successfully in PowerDNS")
+            return {'success': True, 'message': 'Record created/updated successfully'}
+        else:
+            error_msg = f"PowerDNS API error: {response.status_code} - {response.text}"
+            logger.error(error_msg)
+            return {'success': False, 'error': error_msg}
+    
+    except Exception as e:
+        error_msg = f"Failed to create/update record in PowerDNS: {str(e)}"
+        logger.error(error_msg)
+        return {'success': False, 'error': error_msg}
+
+def delete_record_from_powerdns(zone_name, record_name, record_type):
+    """Delete a DNS record from PowerDNS"""
+    try:
+        headers = get_pdns_headers()
+        
+        # Prepare delete data
+        rrsets_data = {
+            'rrsets': [
+                {
+                    'name': record_name,
+                    'type': record_type,
+                    'changetype': 'DELETE'
+                }
+            ]
+        }
+        
+        # Delete record
+        response = requests.patch(
+            f"{PDNS_API_URL}/zones/{zone_name}",
+            headers=headers,
+            json=rrsets_data,
+            timeout=30
+        )
+        
+        if response.status_code in [200, 204]:
+            logger.info(f"Record {record_name} deleted successfully from PowerDNS")
+            return {'success': True, 'message': 'Record deleted successfully'}
+        else:
+            error_msg = f"PowerDNS API error: {response.status_code} - {response.text}"
+            logger.error(error_msg)
+            return {'success': False, 'error': error_msg}
+    
+    except Exception as e:
+        error_msg = f"Failed to delete record from PowerDNS: {str(e)}"
+        logger.error(error_msg)
+        return {'success': False, 'error': error_msg}
+
+@shared_task(bind=True, max_retries=3)
+def create_zone_task(self, zone_name, ns_records):
+    """Celery task to create DNS zone"""
+    try:
+        result = create_zone_in_powerdns(zone_name, ns_records)
+        return result
+    except Exception as e:
+        if self.request.retries < self.max_retries:
+            raise self.retry(countdown=60, exc=e)
+        return {'success': False, 'error': str(e)}
+
+@shared_task(bind=True, max_retries=3)
+def create_record_task(self, zone_name, record_data):
+    """Celery task to create DNS record"""
+    try:
+        result = create_record_in_powerdns(zone_name, record_data)
+        return result
+    except Exception as e:
+        if self.request.retries < self.max_retries:
+            raise self.retry(countdown=60, exc=e)
+        return {'success': False, 'error': str(e)}
+
+@shared_task(bind=True, max_retries=3)
+def auto_provision_domain_task(self, domain_name, origin_ip, user_id):
+    """Celery task to auto-provision domain with DNS and CDN"""
+    try:
+        from models import db, DNSZone, DNSRecord, Domain, User
+        
+        # Check if user exists
+        user = User.query.get(user_id)
+        if not user:
+            return {'success': False, 'error': 'User not found'}
+        
+        # Create or get DNS zone
+        zone = DNSZone.query.filter_by(name=domain_name).first()
+        if not zone:
+            # Create zone
+            ns_records = [DNS_SERVER_NAME, DNS_SERVER_NAME2]
+            powerdns_result = create_zone_in_powerdns(domain_name, ns_records)
+            
+            if not powerdns_result['success']:
+                return powerdns_result
+            
+            # Create in database
+            zone = DNSZone(
+                name=domain_name,
+                kind='Native',
+                ns_records=json.dumps(ns_records),
+                status='active'
+            )
+            db.session.add(zone)
+            db.session.flush()  # Get the ID
+        
+        # Determine IP to use (anycast or origin)
+        edge_mode = os.getenv('EDGE_MODE', 'single_ip')
+        if edge_mode == 'bgp_anycast':
+            anycast_ip = os.getenv('BGP_IP_BLOCK', '203.0.113.1').split('/')[0]
+            target_ip = anycast_ip
+        else:
+            target_ip = origin_ip
+        
+        # Create A record pointing to target IP
+        record_result = create_record_in_powerdns(domain_name, {
+            'name': domain_name,
+            'type': 'A',
+            'content': target_ip,
+            'ttl': 300
+        })
+        
+        if record_result['success']:
+            # Create record in database
+            a_record = DNSRecord(
+                zone_id=zone.id,
+                name=domain_name,
+                type='A',
+                content=target_ip,
+                ttl=300
+            )
+            db.session.add(a_record)
+            
+            # Create www CNAME
+            create_record_in_powerdns(domain_name, {
+                'name': f"www.{domain_name}",
+                'type': 'CNAME',
+                'content': domain_name,
+                'ttl': 300
+            })
+            
+            www_record = DNSRecord(
+                zone_id=zone.id,
+                name=f"www.{domain_name}",
+                type='CNAME',
+                content=domain_name,
+                ttl=300
+            )
+            db.session.add(www_record)
+        
+        db.session.commit()
+        
+        return {
+            'success': True,
+            'message': f'Domain {domain_name} auto-provisioned successfully',
+            'nameservers': [DNS_SERVER_NAME, DNS_SERVER_NAME2],
+            'target_ip': target_ip,
+            'edge_mode': edge_mode
+        }
+    
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Auto-provision failed: {str(e)}")
+        if self.request.retries < self.max_retries:
+            raise self.retry(countdown=60, exc=e)
+        return {'success': False, 'error': str(e)}
+
 @shared_task(bind=True, max_retries=3)
 def provision_domain_dns(self, domain_id):
-    """Provision DNS records for a domain across all edge nodes"""
+    """Enhanced DNS provisioning for XenCDN v8.2"""
     try:
+        from models import db, Domain, EdgeNode, DNSZone, DNSRecord
+        
         logger.info(f"Starting DNS provisioning for domain ID: {domain_id}")
         
         # Get domain
@@ -37,116 +318,16 @@ def provision_domain_dns(self, domain_id):
         
         domain_name = domain.domain_name
         
-        # Create zone in PowerDNS
-        zone_data = {
-            'name': domain_name,
-            'kind': 'Native',
-            'nameservers': [
-                f'ns1.{os.getenv("CDN_DOMAIN", "cachenet.local")}',
-                f'ns2.{os.getenv("CDN_DOMAIN", "cachenet.local")}'
-            ],
-            'records': []
-        }
+        # Auto-provision via the new task
+        result = auto_provision_domain_task(domain_name, domain.origin_server, domain.user_id)
         
-        # Create zone
-        response = requests.post(
-            f'{PDNS_API_URL}/zones',
-            json=zone_data,
-            headers=get_pdns_headers(),
-            timeout=30
-        )
-        
-        if response.status_code not in [201, 409]:  # 409 = zone already exists
-            logger.error(f"Failed to create zone: {response.text}")
-            raise Exception(f"Failed to create DNS zone: {response.status_code}")
-        
-        # Get active edge nodes
-        edge_nodes = EdgeNode.query.filter_by(status='active').all()
-        
-        if not edge_nodes:
-            logger.warning("No active edge nodes found")
-            domain.status = 'error'
+        if result['success']:
+            # Update domain status
+            domain.status = 'active'
+            domain.updated_at = datetime.utcnow()
             db.session.commit()
-            return {'error': 'No active edge nodes available'}
         
-        # Create geo-distributed DNS records
-        records_to_create = []
-        dns_records_created = []
-        
-        for edge_node in edge_nodes:
-            # Create A record for the edge node
-            record_data = {
-                'name': domain_name,
-                'type': 'A',
-                'content': edge_node.ip_address,
-                'ttl': 300
-            }
-            records_to_create.append(record_data)
-            
-            # Create DNS record in database
-            dns_record = DNSRecord(
-                domain_id=domain.id,
-                edge_node_id=edge_node.id,
-                record_type='A',
-                record_name=domain_name,
-                record_value=edge_node.ip_address,
-                ttl=300,
-                geo_location=edge_node.region
-            )
-            db.session.add(dns_record)
-            dns_records_created.append(dns_record)
-        
-        # Add CNAME for www subdomain
-        www_record = {
-            'name': f'www.{domain_name}',
-            'type': 'CNAME',
-            'content': domain_name,
-            'ttl': 300
-        }
-        records_to_create.append(www_record)
-        
-        # Create CDN subdomain pointing to edge nodes (round-robin)
-        for edge_node in edge_nodes:
-            cdn_record = {
-                'name': f'cdn.{domain_name}',
-                'type': 'A',
-                'content': edge_node.ip_address,
-                'ttl': 60  # Lower TTL for faster failover
-            }
-            records_to_create.append(cdn_record)
-        
-        # Update zone with records
-        zone_update_data = {
-            'records': records_to_create
-        }
-        
-        response = requests.patch(
-            f'{PDNS_API_URL}/zones/{domain_name}',
-            json=zone_update_data,
-            headers=get_pdns_headers(),
-            timeout=30
-        )
-        
-        if response.status_code != 204:
-            logger.error(f"Failed to update zone records: {response.text}")
-            raise Exception(f"Failed to update DNS records: {response.status_code}")
-        
-        # Commit DNS records to database
-        db.session.commit()
-        
-        # Update domain status
-        domain.status = 'active'
-        domain.updated_at = datetime.utcnow()
-        db.session.commit()
-        
-        logger.info(f"DNS provisioning completed for domain: {domain_name}")
-        
-        return {
-            'success': True,
-            'domain': domain_name,
-            'records_created': len(records_to_create),
-            'edge_nodes': len(edge_nodes)
-        }
+        return result
         
     except Exception as e:
         logger.error(f"DNS provisioning error for domain {domain_id}: {str(e)}")
@@ -164,96 +345,7 @@ def provision_domain_dns(self, domain_id):
         # Retry logic
         if self.request.retries < self.max_retries:
             logger.info(f"Retrying DNS provisioning for domain {domain_id}")
-            raise self.retry(countdown=60 * (self.request.retries + 1))
-        
-        return {'error': str(e)}
-
-@shared_task(bind=True, max_retries=3)
-def update_domain_dns(self, domain_id, edge_node_id=None):
-    """Update DNS records for a domain"""
-    try:
-        logger.info(f"Updating DNS records for domain ID: {domain_id}")
-        
-        domain = Domain.query.get(domain_id)
-        if not domain:
-            logger.error(f"Domain not found: {domain_id}")
-            return {'error': 'Domain not found'}
-        
-        domain_name = domain.domain_name
-        
-        # Get current DNS records
-        current_records = DNSRecord.query.filter_by(domain_id=domain.id).all()
-        
-        # Get active edge nodes
-        if edge_node_id:
-            edge_nodes = [EdgeNode.query.get(edge_node_id)]
-        else:
-            edge_nodes = EdgeNode.query.filter_by(status='active').all()
-        
-        # Build new record set
-        new_records = []
-        
-        for edge_node in edge_nodes:
-            if edge_node and edge_node.status == 'active':
-                record_data = {
-                    'name': domain_name,
-                    'type': 'A',
-                    'content': edge_node.ip_address,
-                    'ttl': 300
-                }
-                new_records.append(record_data)
-        
-        # Update PowerDNS zone
-        zone_update_data = {
-            'records': new_records
-        }
-        
-        response = requests.patch(
-            f'{PDNS_API_URL}/zones/{domain_name}',
-            json=zone_update_data,
-            headers=get_pdns_headers(),
-            timeout=30
-        )
-        
-        if response.status_code != 204:
-            logger.error(f"Failed to update DNS zone: {response.text}")
-            raise Exception(f"Failed to update DNS zone: {response.status_code}")
-        
-        # Update database records
-        if not edge_node_id:
-            # Remove old records
-            DNSRecord.query.filter_by(domain_id=domain.id).delete()
-            
-            # Add new records
-            for edge_node in edge_nodes:
-                if edge_node and edge_node.status == 'active':
-                    dns_record = DNSRecord(
-                        domain_id=domain.id,
-                        edge_node_id=edge_node.id,
-                        record_type='A',
-                        record_name=domain_name,
-                        record_value=edge_node.ip_address,
-                        ttl=300,
-                        geo_location=edge_node.region
-                    )
-                    db.session.add(dns_record)
-        
-        db.session.commit()
-        
-        logger.info(f"DNS records updated for domain: {domain_name}")
-        
-        return {
-            'success': True,
-            'domain': domain_name,
-            'records_updated': len(new_records)
-        }
-        
-    except Exception as e:
-        logger.error(f"DNS update error for domain {domain_id}: {str(e)}")
-        
-        if self.request.retries < self.max_retries:
-            logger.info(f"Retrying DNS update for domain {domain_id}")
-            raise self.retry(countdown=30 * (self.request.retries + 1))
+            raise self.retry(countdown=60 * (self.request.retries + 1), exc=e)
         
         return {'error': str(e)}
 
@@ -261,104 +353,69 @@ def update_domain_dns(self, domain_id, edge_node_id=None):
 def remove_domain_dns(self, domain_name):
     """Remove DNS zone for a domain"""
     try:
+        from models import db, DNSZone, DNSRecord
+        
         logger.info(f"Removing DNS zone for domain: {domain_name}")
         
         # Delete zone from PowerDNS
-        response = requests.delete(
-            f'{PDNS_API_URL}/zones/{domain_name}',
-            headers=get_pdns_headers(),
-            timeout=30
-        )
+        powerdns_result = delete_zone_from_powerdns(domain_name)
         
-        if response.status_code not in [204, 404]:  # 404 = zone doesn't exist
-            logger.error(f"Failed to delete DNS zone: {response.text}")
-            raise Exception(f"Failed to delete DNS zone: {response.status_code}")
+        if powerdns_result['success']:
+            # Remove from database
+            zone = DNSZone.query.filter_by(name=domain_name).first()
+            if zone:
+                db.session.delete(zone)  # Cascade will remove records
+                db.session.commit()
         
         logger.info(f"DNS zone removed for domain: {domain_name}")
-        
-        return {
-            'success': True,
-            'domain': domain_name
-        }
+        return powerdns_result
         
     except Exception as e:
         logger.error(f"DNS removal error for domain {domain_name}: {str(e)}")
         
         if self.request.retries < self.max_retries:
             logger.info(f"Retrying DNS removal for domain {domain_name}")
-            raise self.retry(countdown=30 * (self.request.retries + 1))
+            raise self.retry(countdown=30 * (self.request.retries + 1), exc=e)
         
         return {'error': str(e)}
 
 @shared_task
-def add_edge_node_to_dns(edge_node_id):
-    """Add new edge node to all domain DNS records"""
+def sync_zones_with_powerdns():
+    """Sync all database zones with PowerDNS (maintenance task)"""
     try:
-        logger.info(f"Adding edge node to DNS: {edge_node_id}")
+        from models import DNSZone
         
-        edge_node = EdgeNode.query.get(edge_node_id)
-        if not edge_node or edge_node.status != 'active':
-            logger.error(f"Edge node not found or not active: {edge_node_id}")
-            return {'error': 'Edge node not found or not active'}
+        zones = DNSZone.query.filter_by(status='active').all()
+        synced_count = 0
         
-        # Get all active domains
-        domains = Domain.query.filter_by(status='active', cdn_enabled=True).all()
-        
-        for domain in domains:
-            # Add DNS record for this edge node
-            dns_record = DNSRecord(
-                domain_id=domain.id,
-                edge_node_id=edge_node.id,
-                record_type='A',
-                record_name=domain.domain_name,
-                record_value=edge_node.ip_address,
-                ttl=300,
-                geo_location=edge_node.region
-            )
-            db.session.add(dns_record)
-            
-            # Update PowerDNS zone
-            update_domain_dns.delay(domain.id)
-        
-        db.session.commit()
-        
-        logger.info(f"Edge node added to DNS for {len(domains)} domains")
+        for zone in zones:
+            try:
+                # Get zone from PowerDNS
+                headers = get_pdns_headers()
+                response = requests.get(
+                    f"{PDNS_API_URL}/zones/{zone.name}",
+                    headers=headers,
+                    timeout=30
+                )
+                
+                if response.status_code == 200:
+                    synced_count += 1
+                    logger.info(f"Zone {zone.name} is in sync")
+                else:
+                    logger.warning(f"Zone {zone.name} not found in PowerDNS, recreating...")
+                    # Recreate zone
+                    ns_records = json.loads(zone.ns_records) if zone.ns_records else [DNS_SERVER_NAME, DNS_SERVER_NAME2]
+                    create_zone_in_powerdns(zone.name, ns_records)
+                    
+            except Exception as e:
+                logger.error(f"Failed to sync zone {zone.name}: {str(e)}")
         
         return {
             'success': True,
-            'edge_node': edge_node.hostname,
-            'domains_updated': len(domains)
+            'zones_processed': len(zones),
+            'zones_synced': synced_count
         }
         
     except Exception as e:
-        logger.error(f"Add edge node to DNS error: {str(e)}")
-        return {'error': str(e)}
-
-@shared_task
-def remove_edge_node_from_dns(edge_node_id):
-    """Remove edge node from all domain DNS records"""
-    try:
-        logger.info(f"Removing edge node from DNS: {edge_node_id}")
-        
-        # Get domains with this edge node
-        dns_records = DNSRecord.query.filter_by(edge_node_id=edge_node_id).all()
-        domain_ids = list(set([record.domain_id for record in dns_records]))
-        
-        # Remove DNS records
-        DNSRecord.query.filter_by(edge_node_id=edge_node_id).delete()
-        db.session.commit()
-        
-        # Update PowerDNS zones
-        for domain_id in domain_ids:
-            update_domain_dns.delay(domain_id)
-        
-        logger.info(f"Edge node removed from DNS for {len(domain_ids)} domains")
-        
-        return {
-            'success': True,
-            'domains_updated': len(domain_ids)
-        }
-        
-    except Exception as e:
-        logger.error(f"Remove edge node from DNS error: {str(e)}")
+        logger.error(f"Zone sync error: {str(e)}")
         return {'error': str(e)}

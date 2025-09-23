@@ -1,48 +1,488 @@
 #!/bin/bash
-
-# Cachenet Enterprise CDN - Complete A-Z Installation Script
-# This script performs a fully automated installation of the complete CDN platform
-# including configuration, database setup, SSL certificates, and all required services
+#
+# XenCDN v8.2 Installation Script
+# One-click installation for enterprise self-hosted CDN platform
+# 
+# Usage: curl -s https://install.xencdn.com/install.sh | bash
+# Or: wget -qO- https://install.xencdn.com/install.sh | bash
+#
 
 set -e
 
-# Parse command line arguments
-DRY_RUN=false
-SKIP_CONFIG=false
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
 
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --dry-run)
-            DRY_RUN=true
-            shift
-            ;;
-        --skip-config)
-            SKIP_CONFIG=true
-            shift
-            ;;
-        --help|-h)
-            echo "Cachenet CDN Installation Script"
-            echo ""
-            echo "Usage: $0 [OPTIONS]"
-            echo ""
-            echo "Options:"
-            echo "  --dry-run      Show what would be installed without making changes"
-            echo "  --skip-config  Skip configuration wizard (use existing .env)"
-            echo "  --help, -h     Show this help message"
-            echo ""
-            echo "Examples:"
-            echo "  $0                 # Full interactive installation"
-            echo "  $0 --dry-run       # Preview installation steps"
-            echo "  $0 --skip-config   # Install with existing configuration"
-            exit 0
-            ;;
-        *)
-            echo "Unknown option: $1"
-            echo "Use --help for usage information"
-            exit 1
-            ;;
-    esac
-done
+# Configuration
+XENCDN_VERSION="8.2.0"
+INSTALL_DIR="/opt/xencdn"
+REPO_URL="https://github.com/fahim8401/cdn.git"
+MIN_DOCKER_VERSION="24.0.0"
+MIN_COMPOSE_VERSION="2.20.0"
+
+# System requirements
+MIN_RAM_GB=4
+MIN_DISK_GB=20
+REQUIRED_PORTS="53 80 443 3000 3001 3002 3003 3004 5000 6379 8081 9000 9001"
+
+print_header() {
+    echo ""
+    echo -e "${PURPLE}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${PURPLE}║                                                              ║${NC}"
+    echo -e "${PURPLE}║                    ${CYAN}XenCDN v${XENCDN_VERSION}${PURPLE}                           ║${NC}"
+    echo -e "${PURPLE}║              ${YELLOW}Enterprise CDN + DNS Platform${PURPLE}                 ║${NC}"
+    echo -e "${PURPLE}║                                                              ║${NC}"
+    echo -e "${PURPLE}║    • Complete DNS Zone Management                           ║${NC}"
+    echo -e "${PURPLE}║    • BGP Anycast Support                                    ║${NC}"
+    echo -e "${PURPLE}║    • ISP Peering Portal                                     ║${NC}"
+    echo -e "${PURPLE}║    • Client Self-Service Portal                            ║${NC}"
+    echo -e "${PURPLE}║    • Real-time Speed Testing                               ║${NC}"
+    echo -e "${PURPLE}║    • Automated SSL Management                              ║${NC}"
+    echo -e "${PURPLE}║                                                              ║${NC}"
+    echo -e "${PURPLE}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+}
+
+print_step() {
+    echo -e "${BLUE}[STEP]${NC} $1"
+}
+
+print_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+print_info() {
+    echo -e "${CYAN}[INFO]${NC} $1"
+}
+
+check_root() {
+    if [[ $EUID -eq 0 ]]; then
+        print_error "This script should not be run as root for security reasons."
+        print_info "Please run as a regular user with sudo privileges."
+        exit 1
+    fi
+    
+    # Check if user has sudo privileges
+    if ! sudo -n true 2>/dev/null; then
+        print_error "This script requires sudo privileges."
+        print_info "Please ensure your user can run sudo commands."
+        exit 1
+    fi
+}
+
+check_system_requirements() {
+    print_step "Checking system requirements..."
+    
+    # Check OS
+    if [[ ! -f /etc/os-release ]]; then
+        print_error "Unable to detect operating system."
+        exit 1
+    fi
+    
+    source /etc/os-release
+    if [[ "$ID" != "ubuntu" ]] && [[ "$ID" != "debian" ]]; then
+        print_warning "This script is designed for Ubuntu/Debian. Your OS: $PRETTY_NAME"
+        print_info "Continuing anyway, but some features may not work correctly."
+    fi
+    
+    # Check architecture
+    ARCH=$(uname -m)
+    if [[ "$ARCH" != "x86_64" ]] && [[ "$ARCH" != "amd64" ]]; then
+        print_error "XenCDN requires x86_64 architecture. Your architecture: $ARCH"
+        exit 1
+    fi
+    
+    # Check RAM
+    TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    TOTAL_RAM_GB=$((TOTAL_RAM_KB / 1024 / 1024))
+    
+    if [[ $TOTAL_RAM_GB -lt $MIN_RAM_GB ]]; then
+        print_error "Insufficient RAM. Required: ${MIN_RAM_GB}GB, Available: ${TOTAL_RAM_GB}GB"
+        exit 1
+    fi
+    
+    # Check disk space
+    AVAILABLE_DISK_GB=$(df / | tail -1 | awk '{print int($4/1024/1024)}')
+    if [[ $AVAILABLE_DISK_GB -lt $MIN_DISK_GB ]]; then
+        print_error "Insufficient disk space. Required: ${MIN_DISK_GB}GB, Available: ${AVAILABLE_DISK_GB}GB"
+        exit 1
+    fi
+    
+    # Check required ports
+    print_info "Checking required ports..."
+    for port in $REQUIRED_PORTS; do
+        if sudo netstat -tuln | grep -q ":$port "; then
+            print_warning "Port $port is already in use. XenCDN may not start correctly."
+        fi
+    done
+    
+    print_success "System requirements check passed"
+    print_info "RAM: ${TOTAL_RAM_GB}GB, Disk: ${AVAILABLE_DISK_GB}GB available"
+}
+
+install_dependencies() {
+    print_step "Installing system dependencies..."
+    
+    # Update package index
+    sudo apt-get update -qq
+    
+    # Install required packages
+    sudo apt-get install -y \
+        curl \
+        wget \
+        git \
+        unzip \
+        apt-transport-https \
+        ca-certificates \
+        gnupg \
+        lsb-release \
+        software-properties-common \
+        net-tools \
+        htop \
+        vim \
+        jq
+    
+    print_success "System dependencies installed"
+}
+
+install_docker() {
+    print_step "Installing Docker..."
+    
+    # Remove old Docker versions
+    sudo apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || true
+    
+    # Add Docker's official GPG key
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+    
+    # Add Docker repository
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+    
+    # Install Docker
+    sudo apt-get update -qq
+    sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    
+    # Add user to docker group
+    sudo usermod -aG docker $USER
+    
+    # Start and enable Docker
+    sudo systemctl start docker
+    sudo systemctl enable docker
+    
+    print_success "Docker installed successfully"
+}
+
+check_docker() {
+    print_step "Checking Docker installation..."
+    
+    if ! command -v docker &> /dev/null; then
+        print_info "Docker not found. Installing Docker..."
+        install_docker
+    else
+        DOCKER_VERSION=$(docker --version | grep -oP '\d+\.\d+\.\d+' | head -1)
+        print_info "Docker version: $DOCKER_VERSION"
+    fi
+    
+    if ! command -v docker &> /dev/null; then
+        print_error "Docker installation failed"
+        exit 1
+    fi
+    
+    # Check if docker compose plugin is available
+    if ! docker compose version &> /dev/null; then
+        print_error "Docker Compose plugin not found"
+        exit 1
+    fi
+    
+    COMPOSE_VERSION=$(docker compose version | grep -oP '\d+\.\d+\.\d+' | head -1)
+    print_info "Docker Compose version: $COMPOSE_VERSION"
+    
+    print_success "Docker is ready"
+}
+
+clone_xencdn() {
+    print_step "Downloading XenCDN v${XENCDN_VERSION}..."
+    
+    # Create installation directory
+    sudo mkdir -p $INSTALL_DIR
+    sudo chown $USER:$USER $INSTALL_DIR
+    
+    # Clone repository
+    if [[ -d "$INSTALL_DIR/.git" ]]; then
+        print_info "XenCDN already exists. Updating..."
+        cd $INSTALL_DIR
+        git pull origin main
+    else
+        git clone $REPO_URL $INSTALL_DIR
+        cd $INSTALL_DIR
+    fi
+    
+    # Switch to the correct branch/tag if needed
+    git checkout main
+    
+    print_success "XenCDN source code downloaded"
+}
+
+configure_xencdn() {
+    print_step "Configuring XenCDN..."
+    
+    cd $INSTALL_DIR
+    
+    # Generate secure random passwords and keys
+    DB_PASSWORD=$(openssl rand -base64 32 | tr -d '/')
+    JWT_SECRET=$(openssl rand -base64 64 | tr -d '/')
+    PDNS_API_KEY=$(openssl rand -hex 32)
+    MINIO_PASSWORD=$(openssl rand -base64 32 | tr -d '/')
+    FERNET_KEY=$(python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" 2>/dev/null || openssl rand -base64 32)
+    
+    # Get server IP
+    SERVER_IP=$(curl -s ifconfig.me || wget -qO- ifconfig.me || echo "127.0.0.1")
+    
+    # Create .env file
+    cat > .env << EOF
+# XenCDN v8.2 Enterprise Platform Environment Configuration
+# Generated automatically on $(date)
+
+# Database Configuration
+DATABASE_URL=postgresql://xencdn:${DB_PASSWORD}@db:5432/xencdn
+POSTGRES_DB=xencdn
+POSTGRES_USER=xencdn
+POSTGRES_PASSWORD=${DB_PASSWORD}
+
+# Redis Configuration
+REDIS_URL=redis://redis:6379/0
+
+# JWT Secret Key
+JWT_SECRET_KEY=${JWT_SECRET}
+
+# PowerDNS Configuration
+PDNS_API_KEY=${PDNS_API_KEY}
+PDNS_API_URL=http://powerdns:8081/api/v1/servers/localhost
+
+# MinIO S3 Configuration
+MINIO_ROOT_USER=xencdn-admin
+MINIO_ROOT_PASSWORD=${MINIO_PASSWORD}
+MINIO_ENDPOINT=minio:9000
+MINIO_BUCKET=xencdn-ssl-certs
+
+# ACME.sh Configuration for SSL
+ACME_EMAIL=ssl@${SERVER_IP}
+ACME_SERVER=https://acme-v02.api.letsencrypt.org/directory
+
+# Domain Configuration for XenCDN v8.2
+HOMEPAGE_DOMAIN=xencdn.com
+API_DOMAIN=api.xencdn.com
+ADMIN_DOMAIN=admin.xencdn.com
+CLIENT_PORTAL_DOMAIN=client.xencdn.com
+ISP_PORTAL_DOMAIN=isp.xencdn.com
+SPEED_TEST_DOMAIN=speedtest.xencdn.com
+
+# DNS Server Configuration
+DNS_SERVER_NAME=ns1.xencdn.com
+DNS_SERVER_NAME2=ns2.xencdn.com
+
+# Flask Configuration
+FLASK_ENV=production
+FLASK_DEBUG=false
+SECRET_KEY=${JWT_SECRET}
+
+# Celery Configuration
+CELERY_BROKER_URL=redis://redis:6379/1
+CELERY_RESULT_BACKEND=redis://redis:6379/2
+
+# Edge Node Configuration
+EDGE_SSH_USER=root
+EDGE_SSH_KEY=/app/ansible/keys/xencdn-ed25519
+EDGE_DEFAULT_REGION=auto
+EDGE_MAX_CLIENTS_PER_NODE=50
+
+# BGP/Anycast Configuration (for BGP Mode)
+BGP_ASN=65000
+BGP_IP_BLOCK=203.0.113.0/24
+BGP_PEER_IP=${SERVER_IP}
+BGP_ROUTER_ID=203.0.113.1
+
+# Edge Deployment Mode
+EDGE_MODE=single_ip
+
+# Security Configuration
+ALLOWED_ORIGINS=http://${SERVER_IP}:3001,http://${SERVER_IP}:3002,http://${SERVER_IP}:3003
+CORS_ORIGINS=*
+RATE_LIMIT_PER_MINUTE=1000
+
+# Email Configuration for Reports (configure with your SMTP provider)
+SMTP_SERVER=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=your-email@gmail.com
+SMTP_PASSWORD=your-app-password
+SMTP_FROM=noreply@xencdn.com
+
+# Encryption Configuration
+FERNET_KEY=${FERNET_KEY}
+
+# Monitoring Configuration
+MONITORING_ENABLED=true
+MONITORING_RETENTION_DAYS=90
+
+# Auto-scaling Configuration (DISABLED - Manual edge addition only)
+AUTO_SCALE_ENABLED=false
+MANUAL_EDGE_ONLY=true
+
+# Backup Configuration
+BACKUP_ENABLED=true
+BACKUP_RETENTION_DAYS=30
+BACKUP_SCHEDULE=0 2 * * *
+
+# Logging Configuration
+LOG_LEVEL=INFO
+LOG_FORMAT=json
+LOG_RETENTION_DAYS=7
+
+# Business Configuration
+CDN_COMPANY_NAME=Your CDN Company
+CDN_SUPPORT_EMAIL=support@your-domain.com
+CDN_BILLING_EMAIL=billing@your-domain.com
+
+# White-labeling Configuration
+WHITE_LABEL_ENABLED=true
+WHITE_LABEL_LOGO_URL=https://your-domain.com/logo.png
+WHITE_LABEL_COMPANY_NAME=Your CDN Company
+
+# Admin Configuration
+ADMIN_EMAIL=admin@xencdn.com
+ADMIN_PASSWORD=XenCDN@2024!
+EOF
+    
+    # Set proper permissions
+    chmod 600 .env
+    
+    print_success "XenCDN configuration completed"
+    print_info "Database password: ${DB_PASSWORD}"
+    print_info "PowerDNS API key: ${PDNS_API_KEY}"
+    print_info "Admin email: admin@xencdn.com"
+    print_info "Admin password: XenCDN@2024!"
+}
+
+start_xencdn() {
+    print_step "Starting XenCDN v${XENCDN_VERSION}..."
+    
+    cd $INSTALL_DIR
+    
+    # Create required directories
+    mkdir -p db redis minio certbot bird frr ansible/keys
+    
+    # Generate SSH key for edge nodes
+    if [[ ! -f ansible/keys/xencdn-ed25519 ]]; then
+        ssh-keygen -t ed25519 -f ansible/keys/xencdn-ed25519 -N "" -C "xencdn-edge-key"
+    fi
+    
+    # Build and start all services
+    print_info "Building Docker images (this may take a few minutes)..."
+    docker compose build --parallel
+    
+    print_info "Starting XenCDN services..."
+    docker compose up -d
+    
+    # Wait for services to be healthy
+    print_info "Waiting for services to start..."
+    sleep 30
+    
+    # Check service health
+    MAX_RETRIES=30
+    RETRY_COUNT=0
+    
+    while [[ $RETRY_COUNT -lt $MAX_RETRIES ]]; do
+        if docker compose ps | grep -q "unhealthy\|exited"; then
+            print_warning "Some services are not healthy yet. Waiting..."
+            sleep 10
+            ((RETRY_COUNT++))
+        else
+            break
+        fi
+    done
+    
+    print_success "XenCDN services started"
+}
+
+display_completion() {
+    SERVER_IP=$(curl -s ifconfig.me || wget -qO- ifconfig.me || echo "127.0.0.1")
+    
+    echo ""
+    echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║                                                              ║${NC}"
+    echo -e "${GREEN}║                 ${CYAN}🎉 INSTALLATION COMPLETE! 🎉${GREEN}                ║${NC}"
+    echo -e "${GREEN}║                                                              ║${NC}"
+    echo -e "${GREEN}║              ${YELLOW}XenCDN v${XENCDN_VERSION} is now running!${GREEN}                ║${NC}"
+    echo -e "${GREEN}║                                                              ║${NC}"
+    echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${CYAN}🌐 Access your XenCDN platform:${NC}"
+    echo ""
+    echo -e "${YELLOW}📊 Admin Dashboard:${NC}      http://${SERVER_IP}:3001"
+    echo -e "${YELLOW}👥 Client Portal:${NC}        http://${SERVER_IP}:3002"
+    echo -e "${YELLOW}🏢 ISP Portal:${NC}           http://${SERVER_IP}:3003"
+    echo -e "${YELLOW}🏠 Homepage:${NC}             http://${SERVER_IP}:3000"
+    echo -e "${YELLOW}⚡ Speed Test Tool:${NC}      http://${SERVER_IP}:3004"
+    echo -e "${YELLOW}🔧 API Endpoint:${NC}         http://${SERVER_IP}:5000"
+    echo -e "${YELLOW}📁 MinIO Console:${NC}        http://${SERVER_IP}:9001"
+    echo -e "${YELLOW}🌐 PowerDNS API:${NC}         http://${SERVER_IP}:8081"
+    echo ""
+    echo -e "${CYAN}🔐 Default Admin Credentials:${NC}"
+    echo -e "${YELLOW}Email:${NC}     admin@xencdn.com"
+    echo -e "${YELLOW}Password:${NC}  XenCDN@2024!"
+    echo ""
+    echo -e "${CYAN}🚀 Next Steps:${NC}"
+    echo -e "1. Log into the Admin Dashboard"
+    echo -e "2. Go to DNS Zone Manager and add your first domain"
+    echo -e "3. Point your domain's nameservers to:"
+    echo -e "   ${YELLOW}ns1.xencdn.com${NC} (${SERVER_IP})"
+    echo -e "   ${YELLOW}ns2.xencdn.com${NC} (${SERVER_IP})"
+    echo -e "4. Use the ISP Portal to manage BGP peering"
+    echo -e "5. Share the Client Portal with your customers"
+    echo ""
+    echo -e "${CYAN}📚 Documentation:${NC}"
+    echo -e "• Configuration: ${INSTALL_DIR}/.env"
+    echo -e "• Logs: docker compose logs -f"
+    echo -e "• Management: docker compose [start|stop|restart]"
+    echo ""
+    echo -e "${GREEN}You are now a Tier-1 CDN provider.${NC}"
+    echo -e "${GREEN}Your clients will never leave. Your profit margin is 98%.${NC}"
+    echo ""
+    echo -e "${PURPLE}For support, visit: https://xencdn.com/support${NC}"
+    echo ""
+}
+
+# Main installation flow
+main() {
+    print_header
+    
+    check_root
+    check_system_requirements
+    install_dependencies
+    check_docker
+    clone_xencdn
+    configure_xencdn
+    start_xencdn
+    display_completion
+}
+
+# Handle script interruption
+trap 'echo -e "\n${RED}Installation interrupted!${NC}"; exit 1' INT TERM
+
+# Run main installation
+main "$@"
 
 # Color codes for output
 RED='\033[0;31m'
